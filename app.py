@@ -109,7 +109,7 @@ def build_revisions(panel: pd.DataFrame) -> pd.DataFrame:
     rev["rev_2nd_minus_1st"] = rev["second"] - rev["first"]
     rev["rev_3rd_minus_1st"] = rev["third"]  - rev["first"]
     rev["rev_3rd_minus_2nd"] = rev["third"]  - rev["second"]
-    rev["pct_rev_3rd_vs_3rd"] = 100 * rev["rev_3rd_minus_1st"] / rev["third"]
+    rev["pct_rev_3rd_vs_1st"] = 100 * rev["rev_3rd_minus_1st"] / rev["first"]
     return rev.reset_index()
 
 
@@ -163,7 +163,7 @@ with st.sidebar:
     show_recessions = st.toggle("Show NBER Recessions", value=True)
     metric = st.selectbox(
         "Revision Metric",
-        ["rev_2nd_minus_1st", "rev_3rd_minus_1st", "rev_3rd_minus_2nd", "pct_rev_3rd_vs_3rd"],
+        ["rev_2nd_minus_1st", "rev_3rd_minus_1st", "rev_3rd_minus_2nd", "pct_rev_3rd_vs_1st"],
         index=1,
         help="Raw deltas are in thousands; percent normalizes across history."
     )
@@ -282,7 +282,7 @@ st.divider()
 # -----------------------------
 st.subheader("Revisions table (filtered)")
 st.dataframe(
-    rev_filt[["ref_month","first","second","third","rev_2nd_minus_1st","rev_3rd_minus_1st","rev_3rd_minus_2nd","pct_rev_3rd_vs_3rd","USREC"]]
+    rev_filt[["ref_month","first","second","third","rev_2nd_minus_1st","rev_3rd_minus_1st","rev_3rd_minus_2nd","pct_rev_3rd_vs_1st","USREC"]]
     .sort_values("ref_month"),
     use_container_width=True,
     height=320,
