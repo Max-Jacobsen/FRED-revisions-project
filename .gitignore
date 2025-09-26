@@ -1,6 +1,9 @@
+# Python
 __pycache__/
 *.pyc
-venv/
 .venv/
-.env
-.vscode/
+venv/
+
+# Streamlit cache & local data
+.streamlit/secrets.toml
+data/
