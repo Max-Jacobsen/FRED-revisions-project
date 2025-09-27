@@ -4,3 +4,4 @@ pandas
 pyarrow
 altair
 python-dateutil
+numpy

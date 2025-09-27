@@ -1,29 +1,32 @@
-# streamlit_app.py — BLS Jobs Report (PAYEMS) Revision Explorer
-# ---------------------------------------------------------------
-# Features
-# - Sidebar: fetch/update data from ALFRED (FRED vintages) with your API key
-# - Filters: date range, recession shading, metric selection, histogram bins
-# - Charts: histogram of revisions, boxplot (recession vs expansion), time series
-# - Caching: saves fetched panel & revisions to speed up iteration
-#
-# How to run locally:
-#   1) pip install streamlit requests pandas pyarrow altair python-dateutil
-#   2) set your key in one of two ways:
-#        - environment:   export FRED_API_KEY="your_key"   (Windows PowerShell: setx FRED_API_KEY "your_key")
-#        - Streamlit secrets: create .streamlit/secrets.toml with FRED_API_KEY = "your_key"
-#   3) streamlit run streamlit_app.py
-#
-# Notes
-# - Internet access is required on your machine to call FRED/ALFRED.
-# - We focus on PAYEMS (All Employees: Total Nonfarm, monthly SA). You can add more series later.
+"""
+streamlit_app.py — BLS Jobs Report (PAYEMS) Revision Explorer
+---------------------------------------------------------------
+Features
+ - Sidebar: fetch/update data from ALFRED (FRED vintages) with your API key
+ - Filters: date range, recession shading, metric selection, histogram bins
+ - Charts: histogram of revisions, boxplot (recession vs expansion), time series
+ - Caching: saves fetched panel & revisions to speed up iteration
+
+How to run locally:
+   1) pip install streamlit requests pandas pyarrow altair python-dateutil
+   2) set your key in one of two ways:
+        - environment:   export FRED_API_KEY="your_key"   (Windows PowerShell: setx FRED_API_KEY "your_key")
+        - Streamlit secrets: create .streamlit/secrets.toml with FRED_API_KEY = "your_key"
+   3) streamlit run streamlit_app.py
+
+Notes
+ - Internet access is required on your machine to call FRED/ALFRED.
+ - We focus on PAYEMS (All Employees: Total Nonfarm, monthly SA). You can add more series later.
+"""
 
 import os
 import time
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import altair as alt
 import pandas as pd
+import numpy as np
 import requests
 import streamlit as st
 
@@ -43,12 +46,13 @@ BASE = "https://api.stlouisfed.org/fred"
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def get_api_key() -> str:
-    # Prefer secrets over env; fall back to env var
+    """Return the FRED API key, preferring Streamlit secrets over environment vars."""
     key = st.secrets.get("FRED_API_KEY", "") if hasattr(st, "secrets") else ""
     return key or os.getenv("FRED_API_KEY", "")
 
 
 def fred(endpoint: str, api_key: str, **params):
+    """Helper to call the FRED/ALFRED API."""
     p = {"api_key": api_key, "file_type": "json"}
     p.update(params)
     url = f"{BASE}/{endpoint}"
@@ -59,12 +63,14 @@ def fred(endpoint: str, api_key: str, **params):
 
 @st.cache_data(show_spinner=False)
 def get_vintage_dates(series_id: str, api_key: str) -> list[str]:
+    """Fetch the list of vintage release dates for a given series."""
     data = fred("series/vintagedates", api_key=api_key, series_id=series_id)
     return data.get("vintage_dates", [])
 
 
 @st.cache_data(show_spinner=False)
 def fetch_obs_for_vintages(series_id: str, api_key: str, vintage_dates: list[str], batch: int = 80, pause: float = 0.15) -> pd.DataFrame:
+    """Pull observations for many vintage dates, batching to avoid timeouts."""
     frames = []
     for i in range(0, len(vintage_dates), batch):
         vd = ",".join(vintage_dates[i:i+batch])
@@ -76,17 +82,18 @@ def fetch_obs_for_vintages(series_id: str, api_key: str, vintage_dates: list[str
         frames.append(df)
         time.sleep(pause)
     if not frames:
-        return pd.DataFrame(columns=["ref_month", "vintage", "value"])  
+        return pd.DataFrame(columns=["ref_month", "vintage", "value"])
     panel = pd.concat(frames, ignore_index=True)
     # types & tidy
     panel["ref_month"] = pd.to_datetime(panel["date"])                 # reference month
     panel["vintage"]   = pd.to_datetime(panel["realtime_start"])       # release snapshot date
     panel["value"]     = pd.to_numeric(panel["value"].replace(".", pd.NA))
-    panel = panel[["ref_month", "vintage", "value"]].dropna().sort_values(["ref_month", "vintage"])  
+    panel = panel[["ref_month", "vintage", "value"]].dropna().sort_values(["ref_month", "vintage"])
     return panel
 
 
 def _first_second_third(g: pd.DataFrame) -> pd.Series:
+    """Return the first, second and third estimates from grouped revisions."""
     g = g.drop_duplicates(subset=["vintage"]).sort_values("vintage")
     vals = g["value"].tolist()
     return pd.Series({
@@ -99,6 +106,7 @@ def _first_second_third(g: pd.DataFrame) -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def build_revisions(panel: pd.DataFrame) -> pd.DataFrame:
+    """Construct a DataFrame with first, second, third estimates and revision metrics."""
     if panel.empty:
         return pd.DataFrame()
     rev = (
@@ -115,23 +123,25 @@ def build_revisions(panel: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def fetch_usrec(api_key: str) -> pd.DataFrame:
-    # Regular FRED series (latest values only)
+    """Fetch the NBER recession indicator (USREC) from FRED."""
     data = fred("series/observations", api_key=api_key, series_id=USREC_SERIES, observation_start="1939-01-01")
     obs = pd.DataFrame(data.get("observations", []))
     if obs.empty:
-        return pd.DataFrame(columns=["ref_month", "USREC"])  
-    obs["ref_month"] = pd.to_datetime(obs["date"])  
-    obs["USREC"] = pd.to_numeric(obs["value"])  
+        return pd.DataFrame(columns=["ref_month", "USREC"])
+    obs["ref_month"] = pd.to_datetime(obs["date"])
+    obs["USREC"] = pd.to_numeric(obs["value"])
     return obs[["ref_month", "USREC"]]
 
 
 def save_parquet(df: pd.DataFrame, name: str) -> Path:
+    """Persist a DataFrame to a named Parquet file in the data directory."""
     fp = DATA_DIR / f"{name}.parquet"
     df.to_parquet(fp, index=False)
     return fp
 
 
 def load_parquet(name: str) -> pd.DataFrame:
+    """Load a named Parquet file from the data directory if it exists."""
     fp = DATA_DIR / f"{name}.parquet"
     if fp.exists():
         return pd.read_parquet(fp)
@@ -167,7 +177,10 @@ with st.sidebar:
         index=1,
         help="Raw deltas are in thousands; percent normalizes across history."
     )
-    bins = st.slider("Histogram bins", min_value=10, max_value=120, value=50, step=5)
+
+    # raw data info for debug feature
+    show_debug = st.sidebar.toggle("Show debug info", value=False)
+
 
 # -----------------------------
 # Data fetch / cache actions
@@ -175,6 +188,19 @@ with st.sidebar:
 if clear_cache:
     st.cache_data.clear()
     st.toast("Cache cleared.")
+
+    for fp in DATA_DIR.glob("*.parquet"):
+        try:
+            fp.unlink()
+        except Exception as e:
+            st.warning(f"Could not delete {fp.name}: {e}")
+
+    for k in ("rev", "rev_filt"):
+        if k in st.session_state:
+            del st.session_state[k]
+
+    st.toast("Cache cleared (memory + files).")
+    st.rerun()
 
 # Try to load cached artifacts first
 panel = load_parquet("panel_payems")
@@ -208,7 +234,16 @@ if do_fetch:
 
 # Guard: if we still don't have data, show instructions
 if rev.empty:
-    st.info("\n**Getting started**\n\n1) Enter your FRED API key in the sidebar.\n2) Click **Fetch / Update Data**.\n3) Then use the filters to explore revisions.\n\nThis app builds a panel of PAYEMS vintages (one snapshot per monthly release),\nreconstructs first→second→third estimates for each reference month, and computes revision deltas.\n    ")
+    st.info("""
+**Getting started**
+
+1) Enter your FRED API key in the sidebar.
+2) Click **Fetch / Update Data**.
+3) Then use the filters to explore revisions.
+
+This app builds a panel of PAYEMS vintages (one snapshot per monthly release),
+reconstructs first→second→third estimates for each reference month, and computes revision deltas.
+    """)
     st.stop()
 
 # Merge recession indicator if available
@@ -232,28 +267,150 @@ rev_filt = rev.loc[mask].copy()
 # -----------------------------
 # Charts
 # -----------------------------
+
+if show_debug:
+    st.subheader("Debug: data going into charts")
+
+    st.write("Rows in full `rev`:", len(rev))
+    st.write("Rows after filter (`rev_filt`):", len(rev_filt))
+
+    # Metric being plotted
+    st.write("Metric selected:", metric)
+
+    # Check NA and basic stats
+    st.write("Nulls in selected metric:", rev_filt[metric].isna().sum())
+    st.write("`describe()` of selected metric:")
+    st.write(rev_filt[metric].describe())
+
+    # Peek at a few rows
+    st.write("Head (filtered):")
+    st.dataframe(rev_filt[["ref_month", "first", "second", "third", metric]].head(10))
+
+    # Are values accidentally in fraction form? (e.g., 0.001 = 0.1%)
+    # If the magnitudes look too small, uncomment the scale-up line.
+    # if rev_filt[metric].abs().max() < 1:
+    #     st.warning("Values look like fractions; scaling by 100 to percent for this debug plot.")
+    #     debug_vals = rev_filt[metric] * 100
+    # else:
+    debug_vals = rev_filt[metric]
+
+    # Quick alternative histogram using explicit bin step
+    debug_hist = alt.Chart(pd.DataFrame({"val": debug_vals})).mark_bar().encode(
+        x=alt.X("val:Q", bin=alt.Bin(step=0.01), title=f"{metric} (bin step=0.01)"),
+        y=alt.Y("count()", title="Count"),
+        tooltip=[alt.Tooltip("count()", title="Count")]
+    ).properties(title="DEBUG histogram (explicit 0.01 bin step)", height=220)
+    st.altair_chart(debug_hist, use_container_width=True)
+
+    # Show unique value count to detect over-filtering
+    st.write("Unique values in metric:", debug_vals.nunique())
+
+    # Optional: show min/max dates of filtered data
+    if not rev_filt.empty:
+        st.write(
+            "Filtered date range:",
+            rev_filt["ref_month"].min().date(), "→", rev_filt["ref_month"].max().date()
+        )
+
+# Create columns for potential future use (not used in histogram but reserved)
 left, right = st.columns([1, 1])
 
 # Histogram
-hist = alt.Chart(rev_filt).mark_bar().encode(
-    x=alt.X(metric, bin=alt.Bin(maxbins=bins), title=metric),
-    y=alt.Y('count()', title='Count'),
-    tooltip=[metric, alt.Tooltip('count()', title='Count')]
-).properties(title=f"Histogram of {metric} ({start_d} to {end_d})", height=300)
-left.altair_chart(hist, use_container_width=True)
 
-# Boxplot by recession
-box = alt.Chart(rev_filt).mark_boxplot().encode(
-    x=alt.X('USREC:N', title='Recession (USREC)'),
-    y=alt.Y(metric, title=metric),
-    color=alt.Color('USREC:N', legend=None)
-).properties(title=f"{metric}: Recession vs Expansion", height=300)
-right.altair_chart(box, use_container_width=True)
+# Clean numeric series
+vals = pd.to_numeric(rev_filt[metric], errors="coerce").dropna()
+if vals.size < 2:
+    st.info("Not enough data to plot a histogram for this selection.")
+else:
+    # Determine if the metric is a percentage
+    is_percent = metric.startswith("pct_") or "%" in metric.lower()
+
+    # Estimate bin width using the Freedman–Diaconis rule for robustness to outliers
+    q75, q25 = np.percentile(vals, [75, 25])
+    iqr = q75 - q25
+    # Fallback to standard deviation if IQR is zero or non-finite
+    if not np.isfinite(iqr) or iqr <= 0:
+        iqr = vals.std(ddof=0)
+    # Compute bin width
+    h = 2 * iqr * (len(vals) ** (-1/3))
+    # Fallback if bin width is invalid
+    if not np.isfinite(h) or h <= 0:
+        h = (vals.max() - vals.min()) / max(np.sqrt(len(vals)), 1.0)
+
+    # Configure axis labels based on metric type
+    title_text = f"{metric} (%)" if is_percent else metric
+    fmt_text   = ".2f" if is_percent else ",.0f"
+    x_axis = alt.Axis(title=title_text, format=fmt_text)
+
+    # Determine a bin width using the Freedman–Diaconis rule and clamp to sensible minimums
+    bin_width = h
+    if is_percent:
+        bin_width = float(np.round(bin_width, 4)) if np.isfinite(bin_width) else (vals.max() - vals.min()) / 50.0
+        if bin_width <= 0:
+            bin_width = (vals.max() - vals.min()) / 50.0
+        bin_width = max(bin_width, 0.01)
+    else:
+        bin_width = float(np.round(bin_width)) if np.isfinite(bin_width) else (vals.max() - vals.min()) / 50.0
+        if bin_width <= 0:
+            bin_width = (vals.max() - vals.min()) / 50.0
+        bin_width = max(bin_width, 1.0)
+
+    # Determine the histogram extent, always including zero
+    min_val = min(float(vals.min()), 0.0)
+    max_val = max(float(vals.max()), 0.0)
+
+    # Define the binning parameters for Altair; using extent ensures bins cover zero
+    bin_params = alt.Bin(extent=[min_val, max_val], step=bin_width)
+
+    # Build the histogram directly from the filtered revisions DataFrame
+    bar_chart = (
+        alt.Chart(rev_filt)
+        .mark_bar(
+            color="steelblue",
+            opacity=0.8,
+            strokeWidth=0  # remove outlines for true bar fill
+        )
+        .encode(
+            x=alt.X(f"{metric}:Q", bin=bin_params, axis=x_axis, scale=alt.Scale(domain=[min_val, max_val])),
+            y=alt.Y("count()", title="Count"),
+            tooltip=[
+                # Show the bin start and end along with count
+                alt.Tooltip(f"bin_{metric}_start:Q", title="Bin start", format=fmt_text),
+                alt.Tooltip(f"bin_{metric}_end:Q",   title="Bin end",   format=fmt_text),
+                alt.Tooltip("count()", title="Count"),
+            ],
+        )
+        .properties(
+            height=400,
+        )
+    )
+
+    # Create a vertical dashed line at x=0 for reference. Using a transform on the
+    # same dataset ensures the rule is always present, even when the domain shifts.
+    zero_line = (
+        alt.Chart(rev_filt)
+        .transform_calculate(x_zero='0')
+        .mark_rule(
+            color="firebrick",
+            strokeDash=[4, 4],
+            size=2
+        )
+        .encode(x='x_zero:Q')
+    )
+
+    # Overlay the zero line on top of the bar chart and set a title
+    hist_chart = (
+        bar_chart + zero_line
+    ).properties(
+        title=f"Histogram of {metric} ({start_d} to {end_d})"
+    )
+    st.altair_chart(hist_chart, use_container_width=True)
+
 
 # Time series with optional recession shading
 line = alt.Chart(rev_filt).mark_line().encode(
     x=alt.X('ref_month:T', title='Reference Month'),
-    y=alt.Y(metric, title=metric)
+    y=alt.Y(f"{metric}:Q", title=metric)
 ).properties(title=f"Time Series: {metric}", height=320)
 
 if show_recessions and 'USREC' in rev_filt.columns:
