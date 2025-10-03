@@ -1,12 +1,5 @@
 """
-app.py — BLS Jobs Report (PAYEMS) Revision Explorer
----------------------------------------------------------------
-This Streamlit application visualises revisions to the U.S. Bureau of Labor
-Statistics payroll employment series (PAYEMS) across data vintages.  It pulls
-historical vintages from the St. Louis Fed’s ALFRED/FRED APIs, derives first,
-second and third estimates for each reference month, computes the revisions
-between those estimates, and plots distributions and time series of the
-differences.
+streamlit_app.py — BLS Jobs Report (PAYEMS) Revision Explorer
 """
 
 import os
@@ -27,20 +20,21 @@ st.set_page_config(page_title="BLS Revisions Explorer", layout="wide")
 DATA_DIR = Path("data/revisions_app")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# PAYEMS (All Employees: Total Nonfarm, Seasonally Adjusted)
 SERIES_DEFAULT = "PAYEMS"
-USREC_SERIES = "USREC"     # Recession indicator
+USREC_SERIES = "USREC"     # Recession indicator (0/1)
 DFF_SERIES = "DFF"          # Federal Funds Effective Rate (mean)
 EFFR_SERIES = "EFFR"        # Effective Federal Funds Rate (median)
 BASE = "https://api.stlouisfed.org/fred"
 
 
 # -----------------------------
-# Functions
+# Helpers
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def get_api_key() -> str:
     key = ""
+    # Streamlit attaches a ``secrets`` attribute at runtime; protect
+    # against environments where it may not be defined.
     if hasattr(st, "secrets"):
         key = st.secrets.get("FRED_API_KEY", "")
     return key or os.getenv("FRED_API_KEY", "")
@@ -84,9 +78,11 @@ def fetch_obs_for_vintages(
     if not frames:
         return pd.DataFrame(columns=["ref_month", "vintage", "value"])
     panel = pd.concat(frames, ignore_index=True)
-
-    panel["ref_month"] = pd.to_datetime(panel["date"])  
-    panel["vintage"] = pd.to_datetime(panel["realtime_start"])  
+    # types & tidy
+    panel["ref_month"] = pd.to_datetime(panel["date"])  # reference month
+    panel["vintage"] = pd.to_datetime(panel["realtime_start"])  # release snapshot date
+    # Convert values to numeric; replace missing with NA.  Multiply by 1 000 to
+    # convert from “thousands of employees” to actual counts.
     panel["value"] = pd.to_numeric(panel["value"].replace(".", pd.NA)) * 1000.0
     panel = (
         panel[["ref_month", "vintage", "value"]]
@@ -150,6 +146,8 @@ def fetch_usrec(api_key: str) -> pd.DataFrame:
     obs["USREC"] = pd.to_numeric(obs["value"])
     return obs[["ref_month", "USREC"]]
 
+
+@st.cache_data(show_spinner=False)
 def fetch_interest_rate(api_key: str, series_id: str) -> pd.DataFrame:
     try:
         data = fred(
@@ -163,11 +161,9 @@ def fetch_interest_rate(api_key: str, series_id: str) -> pd.DataFrame:
     obs = pd.DataFrame(data.get("observations", []))
     if obs.empty:
         return pd.DataFrame(columns=["ref_month", "rate"])
-    
     # Convert the date to datetime and values to float
     obs["date"] = pd.to_datetime(obs["date"])
     obs["value"] = pd.to_numeric(obs["value"], errors="coerce")
-
     # Compute monthly average by grouping by year-month
     obs["ref_month"] = obs["date"].dt.to_period("M").dt.to_timestamp()
     monthly = obs.groupby("ref_month", as_index=False)["value"].mean()
@@ -189,8 +185,6 @@ def load_parquet(name: str) -> pd.DataFrame:
         return pd.read_parquet(fp)
     return pd.DataFrame()
 
-
-# Preload cached interest‑rate series before building the UI. 
 try:
     dff = load_parquet("dff_monthly")  # type: ignore[assignment]
 except Exception:
@@ -205,19 +199,17 @@ except Exception:
 # UI — Sidebar
 # -----------------------------
 st.title("BLS Jobs Report Revision Explorer")
-
 with st.sidebar:
-    # Resolve API key from secrets or environment once; no user input needed.
+   
     stored_key = get_api_key()
 
-    # Inform the maintainer if the key is missing.
     if not stored_key:
         st.error(
             "No FRED API key found. Please add `FRED_API_KEY` to your "
             ".streamlit/secrets.toml` or set the environment variable."
         )
 
-    # Series selector (currently only PAYEMS)
+    # Series selector 
     series_id = st.selectbox("Series", options=[SERIES_DEFAULT], index=0)
 
     colA, colB = st.columns(2)
@@ -261,9 +253,7 @@ with st.sidebar:
     # raw data info for debug feature
     show_debug = st.toggle("Show debug info", value=False)
 
-    # ------------------------------------------------------------------
-    # Interest‑rate controls
-    # ------------------------------------------------------------------
+    # Interest‑rate controls    
     rate_option = st.selectbox(
         "Interest Rate Series",
         options=[
@@ -278,24 +268,22 @@ with st.sidebar:
             "EFFR is the median‑based Effective Federal Funds Rate available from July 2000."
         ),
     )
-    # Date warnings (removes data when used)
+
     if rate_option.startswith(EFFR_SERIES):
         st.caption(
             "**Note:** The EFFR series begins on July 3, 2000.  Earlier months in "
-            "the revisions data will have no interest‑rate values when this series is selected. Therefore when filtering is applied, they will not be included."
+            "the revisions data will have no interest‑rate values when this series is selected. Therefore, they will not be included in the visualization when filtered on."
         )
-
+    
     if rate_option.startswith(DFF_SERIES):
         st.caption(
-            "**Note:** The DFF series begins on July 1, 1954. Earlier months in "
-            "the revisions data will have no interest‑rate values when this series is selected. Therefore when filtering is applied, they will not be included."
+            "**Note:** The DFF series begins on July 1, 1954.  Earlier months in "
+            "the revisions data will have no interest‑rate values when this series is selected. Therefore, they will not be included in the visualization when filtered on."
         )
-
-    # build slides based on min-max values
+    
     rate_min_val: float
     rate_max_val: float
     rate_df_for_slider: pd.DataFrame | None = None
-
     if rate_option.startswith(DFF_SERIES):
         rate_df_for_slider = dff if isinstance(dff, pd.DataFrame) else None
     elif rate_option.startswith(EFFR_SERIES):
@@ -309,7 +297,7 @@ with st.sidebar:
     rate_default_min = round(rate_min_val, 2)
     rate_default_max = round(rate_max_val, 2)
 
-    # Display the slider only when a rate series selected
+    # Display the slider only when a rate series has been selected
     if rate_option != "None":
         rate_range = st.slider(
             "Interest Rate Range (%)",
@@ -324,9 +312,8 @@ with st.sidebar:
             ),
         )
     else:
+
         rate_range = (rate_default_min, rate_default_max)
-
-
 
 
 # -----------------------------
@@ -353,7 +340,8 @@ if clear_cache:
 panel = load_parquet("panel_payems")
 rev = load_parquet("revisions_payems")
 usrec = load_parquet("usrec")
-# Load cached interest rate series if available.  Seperate DFF and EFFR files willl be pulled in later
+
+# Load cached interest‑rate series if available
 dff = load_parquet("dff_monthly")
 effr = load_parquet("effr_monthly")
 
@@ -373,7 +361,7 @@ if do_fetch:
                 f"Found {len(vdates)} vintages (releases). Fetching observations in batches..."
             )
             with st.spinner(
-                "Downloading observations across vintages (this can take a few seconds)..."
+                "Downloading observations across vintages (this can take ~seconds)..."
             ):
                 panel = fetch_obs_for_vintages(series_id, stored_key, vdates)
             if panel.empty:
@@ -388,6 +376,7 @@ if do_fetch:
                 if not usrec.empty:
                     save_parquet(usrec, "usrec")
 
+                # Fetch interest‑rate series for both DFF and EFFR
                 with st.spinner(
                     "Fetching federal funds rates (DFF and EFFR) and computing monthly averages..."
                 ):
@@ -400,31 +389,30 @@ if do_fetch:
 
                 st.success("Data updated!")
 
-# If missing data (will appear after cleared cache)
+# If no data
 if rev.empty:
     st.info(
         """
         **Getting started**
 
-        1) Click **Fetch / Update Data**.
-        2) Use the filters to explore revisions.
+        1) Click **Fetch / Update Data**. (Sourced from FRED)
+        3) Then use the filters to explore revisions.
 
-        This app builds a panel of PAYEMS vintages (one snapshot per monthly release),
-        reconstructs first→second→third estimates for each reference month, and computes
-        revision deltas on actual employment counts.
+        This app builds a panel of PAYEMS vintages,
+        reconstructing first → second → third estimates for each reference month, and computes
+        revision on actual employment counts.
         """
     )
     st.stop()
 
-# Merge recession indicator 
+# Merge recession indicator
 if not usrec.empty:
     rev = rev.merge(usrec, on="ref_month", how="left")
 else:
     rev["USREC"] = 0
 
-# ------------------------------------------------------------------
-# Merge the selected interest‑rate series into the revisions DataFrame
-# ------------------------------------------------------------------
+
+# Merge the selected interest‑rate series
 rate_df: pd.DataFrame | None = None
 if isinstance(rate_option, str):
     if rate_option.startswith(DFF_SERIES):
@@ -432,23 +420,28 @@ if isinstance(rate_option, str):
     elif rate_option.startswith(EFFR_SERIES):
         rate_df = effr if isinstance(effr, pd.DataFrame) else None
 
-# If a valid rate DataFrame exists and is non‑empty, merge it on ref_month.
+
 if rate_df is not None and not rate_df.empty:
     rate_df = rate_df.rename(columns={"rate": "interest_rate"})
     rev = rev.merge(rate_df, on="ref_month", how="left")
 else:
     rev["interest_rate"] = pd.NA
 
-# Date range selector (dependent on data)
+# Date range selector 
 min_date = pd.to_datetime(rev["ref_month"].min()).date()
 max_date = pd.to_datetime(rev["ref_month"].max()).date()
-start_d, end_d = st.sidebar.slider(
-    "Date range",
-    min_value=min_date,
-    max_value=max_date,
-    value=(max(min_date, date(1990, 1, 1)), max_date),
+
+month_range = pd.date_range(start=min_date, end=max_date, freq="MS").date.tolist()
+default_start = max(min_date, date(1990, 1, 1)).replace(day=1)
+default_end = month_range[-1].replace(day=1)
+
+start_d, end_d = st.sidebar.select_slider(
+    "Date range (monthly)",
+    options=month_range,
+    value=(default_start, default_end),
+    format_func=lambda d: d.strftime("%Y-%m"),
 )
-# Apply the date mask to filter the revisions DataFrame
+
 mask = (rev["ref_month"].dt.date >= start_d) & (rev["ref_month"].dt.date <= end_d)
 rev_filt = rev.loc[mask].copy()
 
@@ -459,17 +452,15 @@ if econ_period != "All" and "USREC" in rev_filt.columns:
     elif econ_period == "Non‑recession":
         rev_filt = rev_filt[rev_filt["USREC"] == 0].copy()
 
-# Apply interest‑rate filter if a range has been narrowed.
+# Apply interest‑rate filter 
 time_series_enabled = True
 try:
     rate_min_selected, rate_max_selected = rate_range
-    # Determine if the selected range is narrower than the full available range.
-    # tolerance for rounding 
+    # tol for rounding
     tol = 1e-8
     if rate_option != "None":
         if (rate_min_selected - rate_default_min) > tol or (rate_default_max - rate_max_selected) > tol:
-            # Filter rows based on the selected interest‑rate range; require
-            # non‑missing values.  The column name is ``interest_rate``.
+
             rev_filt = rev_filt[
                 rev_filt["interest_rate"].notna()
                 & (rev_filt["interest_rate"] >= rate_min_selected)
@@ -479,7 +470,7 @@ try:
 except NameError:
     pass
 
-    # Disable time series if the economic period filter is not 'All'
+    # Disable time series if not 'All'
 if econ_period != "All":
     time_series_enabled = False
 
@@ -582,10 +573,10 @@ else:
     min_val = min(float(vals.min()), 0.0)
     max_val = max(float(vals.max()), 0.0)
 
-    # Define the binning parameters for Altair; using extent ensures bins cover zero
+    # Define the binning parameters
     bin_params = alt.Bin(extent=[min_val, max_val], step=bin_width)
 
-    # Build the histogram directly from the filtered revisions DataFrame
+    # Build the histogram directly from the filtered revisions DataFrame. 
     bar_chart = (
         alt.Chart(rev_filt)
         .mark_bar(
@@ -602,9 +593,26 @@ else:
             ),
             y=alt.Y("count()", title="Count"),
             tooltip=[
-                alt.Tooltip(f"bin_{metric}_start:Q", title="Bin start", format=fmt_text),
-                alt.Tooltip(f"bin_{metric}_end:Q", title="Bin end", format=fmt_text),
+                # Number of observations in this bin
                 alt.Tooltip("count()", title="Count"),
+                # Mean value of the revision metric within this bin
+                alt.Tooltip(
+                    f"mean({metric}):Q",
+                    title="Mean value in bin",
+                    format=fmt_text,
+                ),
+                # Minimum value within the bin
+                alt.Tooltip(
+                    f"min({metric}):Q",
+                    title="Min value in bin",
+                    format=fmt_text,
+                ),
+                # Maximum value within the bin
+                alt.Tooltip(
+                    f"max({metric}):Q",
+                    title="Max value in bin",
+                    format=fmt_text,
+                ),
             ],
         )
         .properties(
@@ -629,14 +637,36 @@ else:
 
 # Time series with optional recession shading
 if time_series_enabled:
+    time_series_tooltip = [
+        alt.Tooltip("ref_month:T", title="Reference Month"),
+        alt.Tooltip(
+            f"{metric}:Q",
+            title=metric,
+            format=".2f" if metric.startswith("percent_") or "%" in metric.lower() else ",.0f",
+        ),
+        alt.Tooltip("first_estimate:Q", title="First estimate", format=",.0f"),
+        alt.Tooltip("second_estimate:Q", title="Second estimate", format=",.0f"),
+        alt.Tooltip("third_estimate:Q", title="Third estimate", format=",.0f"),
+    ]
+
+    if "interest_rate" in rev_filt.columns:
+        time_series_tooltip.append(
+            alt.Tooltip(
+                "interest_rate:Q",
+                title="Interest rate (%)",
+                format=".2f",
+            )
+        )
     line = (
         alt.Chart(rev_filt)
         .mark_line()
         .encode(
             x=alt.X("ref_month:T", title="Reference Month"),
             y=alt.Y(f"{metric}:Q", title=metric),
+            tooltip=time_series_tooltip,
         )
         .properties(title=f"Time Series: {metric}", height=320)
+        .interactive()
     )
     if show_recessions and "USREC" in rev_filt.columns:
         # Create recession bands
@@ -678,7 +708,7 @@ with st.expander("Show data table", expanded=False):
         "percent_revision_third_vs_first",
         "USREC",
     ]
-    # Append the generic interest‑rate column
+    # Append the interest‑rate column
     if "interest_rate" in rev_filt.columns:
         display_cols.append("interest_rate")
     st.dataframe(
@@ -686,7 +716,7 @@ with st.expander("Show data table", expanded=False):
         use_container_width=True,
         height=320,
     )
-    # CSV download
+    # download CSV
     csv = rev_filt.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download filtered CSV",
